@@ -4,7 +4,7 @@ This project is a reliability-first voice recording pipeline for long-form sessi
 
 The core goal is simple: no silent loss between browser capture and final transcript.
 
-## Problem We Solved
+## Problem It Solved
 
 Long recordings often fail in subtle ways:
 

@@ -102,6 +102,7 @@ function getErrorMessage(error: unknown) {
 }
 
 async function tryResolveWingetFfmpegPath() {
+  // Winget installs FFmpeg outside PATH in some shells, so probe known install roots.
   if (process.platform !== "win32") {
     return null;
   }
@@ -165,6 +166,7 @@ async function tryResolveWingetFfmpegPath() {
 }
 
 async function resolveFfmpegCommand() {
+  // Resolve once and cache to avoid shelling out per batch.
   if (resolvedFfmpegCommand) {
     return resolvedFfmpegCommand;
   }
@@ -226,6 +228,7 @@ async function runFfmpegTranscodeToWav(inputPath: string, outputPath: string) {
 }
 
 async function concatFilesBinary(inputPaths: string[], outputPath: string) {
+  // Browser MediaRecorder chunks are appendable byte segments for this pipeline.
   await writeFile(outputPath, Buffer.alloc(0));
 
   for (const inputPath of inputPaths) {
@@ -372,6 +375,7 @@ async function transcribeBatchRange(
   try {
     const mergedWebmPath = join(dirPath, "merged.webm");
     const mergedWavPath = join(dirPath, "merged.wav");
+    // Expected time window for this batch; used to reject under-covered outputs.
     const expectedDurationSec =
       (sequenceNoEnd - sequenceNoStart + 1) * CHUNK_DURATION_SECONDS;
 
@@ -379,6 +383,7 @@ async function transcribeBatchRange(
     let mergedError: unknown = null;
 
     try {
+      // Primary path: concatenate all chunks then transcode once for best continuity.
       await concatFilesBinary(
         files.map((file) => file.filePath),
         mergedWebmPath,
@@ -405,6 +410,7 @@ async function transcribeBatchRange(
       const fallbackWavPath = join(dirPath, `chunk-${file.sequenceNo}.wav`);
 
       try {
+        // Fallback path: transcode and transcribe chunk-by-chunk to salvage partial failures.
         await runFfmpegTranscodeToWav(file.filePath, fallbackWavPath);
         const segments = await transcribeSingleFile(
           fallbackWavPath,
@@ -436,6 +442,7 @@ async function transcribeBatchRange(
       fallbackCoverageRatio >= MIN_ACCEPTABLE_COVERAGE_RATIO;
 
     if (mergedAcceptable || fallbackAcceptable) {
+      // Choose the better-covered timeline rather than whichever finished first.
       if (fallbackCoverageRatio > mergedCoverageRatio) {
         return fallbackSegments;
       }
@@ -597,6 +604,7 @@ async function processSingleBatch(
   let lastError: string | null = null;
 
   for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt += 1) {
+    // Retry individual batch failures without restarting the whole session.
     await db
       .update(transcriptionBatches)
       .set({ status: "running", attemptCount: attempt, errorMessage: null })
@@ -682,6 +690,7 @@ async function runTranscriptionWorker(sessionId: string) {
   const totalChunkCount = session.expectedLastSequenceNo + 1;
   const batchCount = Math.ceil(totalChunkCount / CHUNKS_PER_BATCH);
   const queue = Array.from({ length: batchCount }, (_, index) => index);
+  // Bound concurrency so long sessions do not overwhelm network/API quotas.
   const workerCount = Math.min(TRANSCRIPTION_CONCURRENCY, queue.length);
 
   try {

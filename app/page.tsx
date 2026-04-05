@@ -159,6 +159,7 @@ async function writeSessionManifest(manifest: SessionManifest) {
         create: true,
       });
 
+      // Manifest writes can overlap with state updates; retry on OPFS write-lock errors.
       const writable = await manifestHandle.createWritable();
       await writable.write(JSON.stringify(manifest));
       await writable.close();
@@ -288,6 +289,7 @@ export default function Home() {
       updatedAt: new Date().toISOString(),
     };
 
+    // Serialize manifest writes so UI state updates do not race each other.
     const queuedWrite = manifestWriteChainRef.current
       .catch(() => {
         // Keep chain alive after a previous rejected write.
@@ -416,6 +418,7 @@ export default function Home() {
           throw error;
         }
 
+        // Exponential backoff for transient 5xx/network upload failures.
         updateChunkState(localChunk.chunkId, "queued", {
           retryCount: attempt,
         });
@@ -605,6 +608,7 @@ export default function Home() {
 
       idleCycles += 1;
       if (idleCycles >= STOP_UPLOAD_IDLE_CYCLES) {
+        // Require consecutive idle checks to avoid stop-time races with late chunk events.
         return;
       }
 
@@ -628,6 +632,7 @@ export default function Home() {
         return;
       }
 
+      // Retry actionable states until either acked or max rounds are reached.
       for (const chunk of pendingChunks) {
         await uploadChunkWithRetry(chunk);
       }
@@ -665,6 +670,7 @@ export default function Home() {
     setStatusWithRef("finalizing");
     await finalizeRecording(currentSessionId, lastSequenceNo);
 
+    // Transcription starts only after finalize confirms complete durable coverage.
     setStatusWithRef("transcribing");
     await startTranscription(currentSessionId);
     const transcriptionResult = await pollTranscription(currentSessionId);
