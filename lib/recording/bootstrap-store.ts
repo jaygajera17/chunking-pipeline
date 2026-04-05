@@ -1,5 +1,7 @@
 import { randomUUID } from "crypto";
 
+// Bootstrap-only in-memory store. This will be replaced by DB + object storage.
+
 export type RecordingSessionStatus =
   | "created"
   | "recording"
@@ -93,6 +95,7 @@ function scheduleTranscription(sessionId: string) {
   job.status = "running";
   job.startedAt = new Date().toISOString();
 
+  // Simulate async background transcription work.
   setTimeout(() => {
     const chunkMap = getOrCreateChunkMap(sessionId);
     const orderedChunks = [...chunkMap.values()].sort(
@@ -235,6 +238,7 @@ export function finalizeSession(
   const session = getSessionOrThrow(sessionId);
   session.status = "stopping";
 
+  // Finalize only when the session has contiguous, acknowledged chunks.
   const reconciliation = reconcileSession(sessionId, 0, expectedLastSequenceNo);
   if (reconciliation.repairRequired) {
     return {

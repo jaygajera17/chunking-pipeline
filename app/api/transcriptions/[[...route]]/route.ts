@@ -4,12 +4,13 @@ import { handle } from "hono/vercel";
 import { z } from "zod";
 
 import {
-  getTranscriptionResult,
-  getTranscriptionStatus,
-} from "@/lib/recording/bootstrap-store";
+  getTranscriptionResultForSession,
+  getTranscriptionStatusForSession,
+} from "@/lib/recording/recording-service";
 
 export const runtime = "nodejs";
 
+// Bootstrap endpoints for transcription status and stitched result.
 const app = new Hono().basePath("/api/transcriptions");
 
 const sessionIdParamSchema = z.object({
@@ -19,11 +20,11 @@ const sessionIdParamSchema = z.object({
 app.get(
   "/:sessionId/status",
   zValidator("param", sessionIdParamSchema),
-  (c) => {
+  async (c) => {
     const { sessionId } = c.req.valid("param");
 
     try {
-      return c.json(getTranscriptionStatus(sessionId));
+      return c.json(await getTranscriptionStatusForSession(sessionId));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return c.json({ error: message }, 404);
@@ -34,11 +35,11 @@ app.get(
 app.get(
   "/:sessionId/result",
   zValidator("param", sessionIdParamSchema),
-  (c) => {
+  async (c) => {
     const { sessionId } = c.req.valid("param");
 
     try {
-      return c.json(getTranscriptionResult(sessionId));
+      return c.json(await getTranscriptionResultForSession(sessionId));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       return c.json({ error: message }, 404);

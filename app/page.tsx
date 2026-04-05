@@ -12,11 +12,18 @@ type ChunkState =
 
 type LocalChunk = {
   chunkId: string;
+  sessionId: string;
   sequenceNo: number;
   sha256: string;
   sizeBytes: number;
   opfsPath: string;
   state: ChunkState;
+};
+
+type FinalizeResponse = {
+  status?: string;
+  error?: string;
+  missingChunkIds?: string[];
 };
 
 async function digestSha256(blob: Blob) {
@@ -32,6 +39,7 @@ async function writeChunkToOpfs(
   sequenceNo: number,
   blob: Blob,
 ) {
+  // OPFS write happens before upload to keep a local durable copy.
   const getDirectory = navigator.storage?.getDirectory;
   if (!getDirectory) {
     throw new Error("OPFS is not supported in this browser");
@@ -55,6 +63,29 @@ async function writeChunkToOpfs(
   return `/sessions/${sessionId}/${sequenceNo}.webm`;
 }
 
+async function readChunkFromOpfs(sessionId: string, sequenceNo: number) {
+  const getDirectory = navigator.storage?.getDirectory;
+  if (!getDirectory) {
+    return null;
+  }
+
+  try {
+    const root = await getDirectory.call(navigator.storage);
+    const sessionsDir = await root.getDirectoryHandle("sessions", {
+      create: false,
+    });
+    const sessionDir = await sessionsDir.getDirectoryHandle(sessionId, {
+      create: false,
+    });
+    const chunkFile = await sessionDir.getFileHandle(`${sequenceNo}.webm`, {
+      create: false,
+    });
+    return await chunkFile.getFile();
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [status, setStatus] = useState("idle");
@@ -64,7 +95,26 @@ export default function Home() {
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingUploadsRef = useRef<Set<Promise<void>>>(new Set());
+  const chunksRef = useRef<LocalChunk[]>([]);
   const sequenceRef = useRef(0);
+
+  function setChunksWithRef(updater: (previous: LocalChunk[]) => LocalChunk[]) {
+    setChunks((previous) => {
+      const next = updater(previous);
+      chunksRef.current = next;
+      return next;
+    });
+  }
+
+  function updateChunkState(chunkId: string, state: ChunkState) {
+    setChunksWithRef((previous) =>
+      previous.map((chunk) =>
+        chunk.chunkId === chunkId ? { ...chunk, state } : chunk,
+      ),
+    );
+  }
 
   const opfsSupportText = useMemo(() => {
     return typeof navigator !== "undefined" && !!navigator.storage?.getDirectory
@@ -86,31 +136,58 @@ export default function Home() {
   }
 
   async function uploadChunk(localChunk: LocalChunk) {
+    const payload = await readChunkFromOpfs(
+      localChunk.sessionId,
+      localChunk.sequenceNo,
+    );
+    if (!payload) {
+      throw new Error("Chunk missing from OPFS before upload");
+    }
+
     const response = await fetch(
       `/api/recordings/chunks/${localChunk.chunkId}`,
       {
         method: "PUT",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "audio/webm;codecs=opus",
+          "x-session-id": localChunk.sessionId,
+          "x-sequence-no": String(localChunk.sequenceNo),
+          "x-sha256": localChunk.sha256,
+          "x-size-bytes": String(localChunk.sizeBytes),
         },
-        body: JSON.stringify({
-          sessionId,
-          sequenceNo: localChunk.sequenceNo,
-          sha256: localChunk.sha256,
-          sizeBytes: localChunk.sizeBytes,
-          mimeType: "audio/webm;codecs=opus",
-        }),
+        body: payload,
       },
     );
 
     if (!response.ok) {
-      throw new Error("Chunk upload failed");
+      const payloadJson = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      throw new Error(payloadJson?.error ?? "Chunk upload failed");
+    }
+  }
+
+  async function repairChunk(chunkId: string, payload: Blob) {
+    const response = await fetch(`/api/recordings/repair/${chunkId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "audio/webm;codecs=opus",
+      },
+      body: payload,
+    });
+
+    if (!response.ok) {
+      const payloadJson = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      throw new Error(payloadJson?.error ?? "Repair upload failed");
     }
   }
 
   async function finalizeRecording(
     currentSessionId: string,
     lastSequenceNo: number,
+    retriesLeft = 2,
   ) {
     const response = await fetch(
       `/api/recordings/sessions/${currentSessionId}/finalize`,
@@ -123,16 +200,55 @@ export default function Home() {
       },
     );
 
-    const data = await response.json();
-    if (!response.ok) {
-      const message =
-        typeof data?.error === "string"
-          ? data.error
-          : "Finalize failed or repair required";
-      throw new Error(message);
+    const data = (await response.json().catch(() => ({}))) as FinalizeResponse;
+
+    if (response.ok) {
+      return data;
     }
 
-    return data;
+    if (response.status === 409 && retriesLeft > 0) {
+      const missingChunkIds = Array.isArray(data.missingChunkIds)
+        ? data.missingChunkIds
+        : [];
+
+      if (missingChunkIds.length === 0) {
+        throw new Error(
+          "Finalize requested repair but no missing chunks were provided",
+        );
+      }
+
+      setStatus("repairing");
+      for (const missingChunkId of missingChunkIds) {
+        const [, sequenceNoText] = missingChunkId.split(":");
+        const sequenceNo = Number(sequenceNoText);
+
+        if (Number.isNaN(sequenceNo) || sequenceNo < 0) {
+          continue;
+        }
+
+        const payload = await readChunkFromOpfs(currentSessionId, sequenceNo);
+        if (!payload) {
+          throw new Error(
+            `Missing local OPFS chunk for repair sequence ${sequenceNo}`,
+          );
+        }
+
+        await repairChunk(missingChunkId, payload);
+        updateChunkState(missingChunkId, "acked");
+      }
+
+      return finalizeRecording(
+        currentSessionId,
+        lastSequenceNo,
+        retriesLeft - 1,
+      );
+    }
+
+    const message =
+      typeof data?.error === "string"
+        ? data.error
+        : "Finalize failed or repair required";
+    throw new Error(message);
   }
 
   async function pollTranscription(currentSessionId: string) {
@@ -163,11 +279,21 @@ export default function Home() {
     try {
       setError(null);
       setStatus("preparing");
-      setChunks([]);
+      setChunksWithRef(() => []);
       sequenceRef.current = 0;
 
       const createdSessionId = await createRecordingSession();
       setSessionId(createdSessionId);
+
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+      }
+
+      heartbeatRef.current = setInterval(() => {
+        void fetch(`/api/recordings/sessions/${createdSessionId}/heartbeat`, {
+          method: "PATCH",
+        });
+      }, 20000);
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
@@ -181,60 +307,95 @@ export default function Home() {
           return;
         }
 
+        // Sequence number is monotonic and used to build deterministic chunk ids.
         const sequenceNo = sequenceRef.current;
         sequenceRef.current += 1;
 
-        try {
-          const sha256 = await digestSha256(event.data);
-          const chunkId = `${createdSessionId}:${sequenceNo}:${sha256}`;
-          const opfsPath = await writeChunkToOpfs(
-            createdSessionId,
-            sequenceNo,
-            event.data,
-          );
+        const uploadTask = (async () => {
+          try {
+            const sha256 = await digestSha256(event.data);
+            const chunkId = `${createdSessionId}:${sequenceNo}:${sha256}`;
+            const opfsPath = await writeChunkToOpfs(
+              createdSessionId,
+              sequenceNo,
+              event.data,
+            );
 
-          const newChunk: LocalChunk = {
-            chunkId,
-            sequenceNo,
-            sha256,
-            sizeBytes: event.data.size,
-            opfsPath,
-            state: "persisted",
-          };
+            const newChunk: LocalChunk = {
+              chunkId,
+              sessionId: createdSessionId,
+              sequenceNo,
+              sha256,
+              sizeBytes: event.data.size,
+              opfsPath,
+              state: "queued",
+            };
 
-          setChunks((previous) => [...previous, newChunk]);
+            setChunksWithRef((previous) => [...previous, newChunk]);
 
-          await uploadChunk(newChunk);
+            // Upload only after OPFS persistence succeeds.
+            updateChunkState(chunkId, "uploading");
+            await uploadChunk(newChunk);
+            updateChunkState(chunkId, "acked");
+          } catch (chunkError) {
+            const message =
+              chunkError instanceof Error
+                ? chunkError.message
+                : "Chunk handling failed";
 
-          setChunks((previous) =>
-            previous.map((chunk) =>
-              chunk.chunkId === newChunk.chunkId
-                ? { ...chunk, state: "acked" }
-                : chunk,
-            ),
-          );
-        } catch (chunkError) {
-          const message =
-            chunkError instanceof Error
-              ? chunkError.message
-              : "Chunk handling failed";
-          setError(message);
-          setStatus("failed");
-          recorder.stop();
-        }
+            setError(message);
+            setStatus("failed");
+
+            const failedChunk = chunksRef.current.find(
+              (chunk) => chunk.sequenceNo === sequenceNo,
+            );
+
+            if (failedChunk) {
+              updateChunkState(failedChunk.chunkId, "failed");
+            }
+
+            if (recorder.state !== "inactive") {
+              recorder.stop();
+            }
+          }
+        })();
+
+        pendingUploadsRef.current.add(uploadTask);
+        void uploadTask.finally(() => {
+          pendingUploadsRef.current.delete(uploadTask);
+        });
       };
 
       recorder.onstop = async () => {
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current);
+          heartbeatRef.current = null;
+        }
+
         const lastSequenceNo = sequenceRef.current - 1;
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
+
+        const pendingUploads = [...pendingUploadsRef.current];
+        if (pendingUploads.length > 0) {
+          await Promise.allSettled(pendingUploads);
+        }
 
         if (lastSequenceNo < 0) {
           setStatus("stopped_no_data");
           return;
         }
 
+        const hasFailedChunk = chunksRef.current.some(
+          (chunk) => chunk.state === "failed",
+        );
+        if (hasFailedChunk) {
+          setStatus("failed");
+          return;
+        }
+
         try {
+          // Finalize first, then poll transcription status.
           setStatus("finalizing");
           await finalizeRecording(createdSessionId, lastSequenceNo);
           setStatus("finalized");
