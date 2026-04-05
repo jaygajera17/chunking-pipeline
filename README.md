@@ -15,6 +15,10 @@ Long recordings often fail in subtle ways:
 
 Our approach prioritizes durability and recoverability over UI complexity.
 
+## Preview
+<img width="1174" height="711" alt="image" src="https://github.com/user-attachments/assets/b23e9b7c-c34e-4c11-8ebb-850acab12666" />
+
+
 ## Approach Summary
 
 1. Record audio in 5-second browser chunks.
