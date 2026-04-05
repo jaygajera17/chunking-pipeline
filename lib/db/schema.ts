@@ -47,6 +47,7 @@ export const recordingSessions = pgTable("recording_sessions", {
   stoppedAt: timestamp("stopped_at", { withTimezone: true }),
   expectedLastSequenceNo: integer("expected_last_sequence_no"),
   durationMs: integer("duration_ms"),
+  lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }),
 });
 
 export const recordingChunks = pgTable(
@@ -85,6 +86,7 @@ export const transcriptionJobs = pgTable("transcription_jobs", {
   errorMessage: text("error_message"),
   startedAt: timestamp("started_at", { withTimezone: true }),
   completedAt: timestamp("completed_at", { withTimezone: true }),
+  attemptCount: integer("attempt_count").notNull().default(0),
 });
 
 export const transcriptionBatches = pgTable(
@@ -100,6 +102,7 @@ export const transcriptionBatches = pgTable(
     audioOffsetSec: real("audio_offset_sec").notNull(),
     status: transcriptionBatchStatusEnum("status").notNull().default("queued"),
     attemptCount: integer("attempt_count").notNull().default(0),
+    errorMessage: text("error_message"),
   },
   (table) => [
     unique("transcription_batches_session_id_batch_index_unique").on(

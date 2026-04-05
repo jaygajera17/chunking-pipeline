@@ -23,5 +23,6 @@ export async function closeDbPool() {
     await pool.end();
     pool = null;
     db = null;
-  }
+ 
+}
 }

@@ -6,11 +6,12 @@ import { z } from "zod";
 import {
   getTranscriptionResultForSession,
   getTranscriptionStatusForSession,
+  startTranscriptionForSession,
 } from "@/lib/recording/recording-service";
 
 export const runtime = "nodejs";
 
-// Bootstrap endpoints for transcription status and stitched result.
+// Endpoints for triggering transcription and reading status/result.
 const app = new Hono().basePath("/api/transcriptions");
 
 const sessionIdParamSchema = z.object({
@@ -47,4 +48,20 @@ app.get(
   },
 );
 
+app.post(
+  "/:sessionId/start",
+  zValidator("param", sessionIdParamSchema),
+  async (c) => {
+    const { sessionId } = c.req.valid("param");
+
+    try {
+      return c.json(await startTranscriptionForSession(sessionId));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      return c.json({ error: message }, 400);
+    }
+  },
+);
+
 export const GET = handle(app);
+export const POST = handle(app);
