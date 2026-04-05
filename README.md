@@ -133,13 +133,7 @@ npm run dev
 
 Open: http://localhost:3000
 
-## Judge Demo Flow (Recommended)
 
-1. Start recording and speak continuously for 20-30 seconds.
-2. Stop recording and observe staged processing states.
-3. Wait for transcript completion.
-4. Open diagnostics panel to show chunk reliability metadata.
-5. Show API status endpoint returning batch/job progress.
 
 ## API Surface
 
